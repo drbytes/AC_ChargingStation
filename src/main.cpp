@@ -1,131 +1,144 @@
 #include <Arduino.h>
 #include "PWM.h"
 
-#define CP_OUT 10
-#define CP_IN A0
+const int CP_OUT = 10;
+const int CP_IN = A0;
+const int RELAY_PIN = 16;
+const int LED_TOP = 6;
+const int LED_BOTTOM = 2;
+const int LED_MIDDLE_D = 3;
+const int LED_MIDDLE_U = 4;
 
-int counter = 0;
-int counter2 = 0;
+const int FREQUENCY = 1000;
+const int PEAK_VOLTAGE_THRESHOLD_A = 970;
+const int PEAK_VOLTAGE_THRESHOLD_B = 870;
+const int PEAK_VOLTAGE_THRESHOLD_C = 780;
+const int DUTY_CYCLE_10A = 42;
+const int DUTY_CYCLE_MAX = 255;
 
-float cp_pwm = 255;
-int frequency = 1000;
+const int COUNTER_THRESHOLD = 10;
+const int PEAK_VOLTAGE_SAMPLES = 1000;
+
+enum State {
+  STATE_A,
+  STATE_B,
+  STATE_C,
+  STATE_F
+};
 
 int findPeakVoltage();
-int peak_voltage = 0;
-int current_voltage = 0;
+void updateLEDs(State state, bool charging);
+void updateRelay(State state);
+void updatePWM(State state);
 
-char state = 'z';
-
-int charging = 0;
+int peakVoltage = 0;
+State currentState = STATE_F;
+bool charging = false;
 
 void setup() {
-  // Set up the serial port
   Serial.begin(9600);
 
-  // Set up the PWM
   InitTimersSafe();
-  bool success = SetPinFrequencySafe(CP_OUT, frequency);
-  if(success) {
-    pinMode(CP_OUT, OUTPUT);  
+  bool success = SetPinFrequencySafe(CP_OUT, FREQUENCY);
+  if (success) {
+    pinMode(CP_OUT, OUTPUT);
   }
 
-  // Set up the LEDs
-  pinMode(4, OUTPUT);
-  pinMode(6, OUTPUT);
-  pinMode(2, OUTPUT);
-  pinMode(3, OUTPUT);
+  pinMode(LED_TOP, OUTPUT);
+  pinMode(LED_BOTTOM, OUTPUT);
+  pinMode(LED_MIDDLE_D, OUTPUT);
+  pinMode(LED_MIDDLE_U, OUTPUT);
+  pinMode(RELAY_PIN, OUTPUT);
 
-  //Relay
-  pinMode(16, OUTPUT);
-
-  digitalWrite(16, LOW); // Relays open
-  digitalWrite(6, HIGH); // Top LED on
-  digitalWrite(2, LOW); // Bottom LED off
+  digitalWrite(RELAY_PIN, LOW);
+  digitalWrite(LED_TOP, HIGH);
+  digitalWrite(LED_BOTTOM, LOW);
 }
 
 void loop() {
-  counter++;
-  if (counter > 10) {
+  static int counter = 0;
+  static int counter2 = 0;
+
+  if (++counter > COUNTER_THRESHOLD) {
     counter = 0;
-    Serial.println("contador = 10");
+    Serial.println("Counter is at 10");
     Serial.print("Peak Voltage: ");
-    Serial.println(peak_voltage);
-    Serial.println(state);
+    Serial.println(peakVoltage);
+    Serial.println(currentState);
   }
-  if (charging == 1) {
-    counter2++;
-    if (counter2 > 10) {
+
+  if (charging) {
+    if (++counter2 > COUNTER_THRESHOLD) {
       counter2 = 0;
-      //if digitalwrite 3 is high, turn it off
-      if (digitalRead(3) == HIGH) {
-        digitalWrite(3, LOW);
-        digitalWrite(4, HIGH);
-      }
-      else {
-        digitalWrite(3, HIGH);
-        digitalWrite(4, LOW);
-      }
+      digitalWrite(LED_MIDDLE_D, !digitalRead(LED_MIDDLE_D));
+      digitalWrite(LED_MIDDLE_U, !digitalRead(LED_MIDDLE_U));
     }
   }
-  
-  // Read the CP voltage peaks
-  findPeakVoltage();
 
-  // Set the charging state based on the peak voltage
-  if (peak_voltage > 970) {
-    //state A
-    state = 'a';
-    charging = 0;
-    pwmWrite(CP_OUT, 255); // CP set to fixed +12V
-    digitalWrite(16, LOW); // Relays open
-    digitalWrite(2, LOW); // Bottom LED off
-    digitalWrite(3, LOW); // Middle d LED off
-    digitalWrite(4, LOW); // Middle u LED off
-  }
-  else if (peak_voltage > 870) {
-    //state B
-    state = 'b';
-    charging = 0;
-    pwmWrite(CP_OUT, 42); // 10 A -> Duty Cycle = 10/0.6 = 16.67% -> 255 * 0.1667 = 42.5
-    digitalWrite(16, LOW); // Relays open
-    digitalWrite(2, HIGH); // Bottom LED on
-    digitalWrite(3, LOW); // Middle d LED off
-    digitalWrite(4, LOW); // Middle u LED off
-  }
-  else if (peak_voltage > 780) {
-    //state C
-    state = 'c';
-    charging = 1;
-    pwmWrite(CP_OUT, 42);
-    digitalWrite(16, HIGH); // Relays closed
-    digitalWrite(2, HIGH); // Bottom LED on
-  }
-  else {
-    //state F
-    state = 'f';
-    charging = 0;
-    pwmWrite(CP_OUT, 255);
-    digitalWrite(16, LOW); // Relays open
-    digitalWrite(2, LOW); // Bottom LED off
-    digitalWrite(3, LOW); // Middle d LED off
-    digitalWrite(4, LOW); // Middle u LED off
+  peakVoltage = findPeakVoltage();
+
+  if (peakVoltage > PEAK_VOLTAGE_THRESHOLD_A) {
+    currentState = STATE_A;
+    charging = false;
+  } else if (peakVoltage > PEAK_VOLTAGE_THRESHOLD_B) {
+    currentState = STATE_B;
+    charging = false;
+  } else if (peakVoltage > PEAK_VOLTAGE_THRESHOLD_C) {
+    currentState = STATE_C;
+    charging = true;
+  } else {
+    currentState = STATE_F;
+    charging = false;
   }
 
-
-
+  updateLEDs(currentState, charging);
+  updateRelay(currentState);
+  updatePWM(currentState);
 }
 
-// function that finds the peak voltage read by pin A0
-  int findPeakVoltage() {
-    int i = 0;
-    current_voltage = 0;
-    peak_voltage = 0;
-    while (i < 1000) {
-      current_voltage = analogRead(CP_IN);
-      if (current_voltage > peak_voltage) {
-        peak_voltage = current_voltage;
-      }
-      i++;
-    }
-    return peak_voltage;
+int findPeakVoltage() {
+  int peakVoltage = 0;
+  for (int i = 0; i < PEAK_VOLTAGE_SAMPLES; i++) {
+    int currentVoltage = analogRead(CP_IN);
+    peakVoltage = max(peakVoltage, currentVoltage);
   }
+  return peakVoltage;
+}
+
+void updateLEDs(State state, bool charging) {
+  switch (state) {
+    case STATE_A:
+    case STATE_F:
+      digitalWrite(LED_BOTTOM, LOW);
+      digitalWrite(LED_MIDDLE_D, LOW);
+      digitalWrite(LED_MIDDLE_U, LOW);
+      break;
+    case STATE_B:
+    case STATE_C:
+      digitalWrite(LED_BOTTOM, HIGH);
+      break;
+  }
+}
+
+void updateRelay(State state) {
+  switch (state) {
+    case STATE_C:
+      digitalWrite(RELAY_PIN, HIGH);
+      break;
+    default:
+      digitalWrite(RELAY_PIN, LOW);
+      break;
+  }
+}
+
+void updatePWM(State state) {
+  switch (state) {
+    case STATE_B:
+    case STATE_C:
+      pwmWrite(CP_OUT, DUTY_CYCLE_10A);
+      break;
+    default:
+      pwmWrite(CP_OUT, DUTY_CYCLE_MAX);
+      break;
+  }
+}
